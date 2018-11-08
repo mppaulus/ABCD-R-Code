@@ -1,0 +1,479 @@
+---
+title: "ABCDMediaActivityMixedModels_07.18.2018"
+author: "Martin P Paulus"
+date: "07/18/2018"
+output: 
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# Example Libraries to use:
+# library(psych)
+library(tableone)
+library(glmnet)
+library(MASS)
+# library(mice)
+library(ggplot2)
+library(scales)
+library(vcd)
+library(GFA)
+library(Hmisc)
+library(gtools)
+library(RColorBrewer)
+library(corrplot)
+library(plyr)
+library(VIM)
+
+#Wes' Libraries:
+library(plotly)
+library(plotrix)
+library(gamm4)
+
+# Library to visualize Mixed Effects Models:
+library(merTools)
+library(visreg)
+library(gridExtra)
+
+# To produce nice tables:
+library(knitr)
+library(kableExtra)
+
+```
+
+```{r General Setup, echo=FALSE}
+
+rm(list=ls())
+setwd("/Users/mpaulus/Dropbox (Personal)/ABCD_GFA/")
+# list.files()
+
+mydir <- paste("/Users/mpaulus/Dropbox (Personal)/ABCD_GFA/")
+
+# Need this function
+rep.row<-function(x,n){
+   matrix(rep(x,each=n),nrow=n)
+}
+
+```
+
+```{r my gamm4 function, echo=FALSE}
+
+myGAMM4 <- function(dv,iv,cv,nv,dat)
+{
+  
+  indv <- paste(iv, collapse=" + ")
+  cova <- paste(cv, collapse=" + ")
+  nstv <- paste("~","(","1","|",nv[1],"/",nv[2],")",sep="")
+  
+  datnames <- names(dat)
+  
+  if(iv %in% datnames) {
+    form1 <- paste(dv," ~ ",indv," + ",cova,sep="")
+  } else { form1 <- paste(dv," ~ ",cova,sep="")}
+  
+  # print(form1)
+  # print(nstv)
+  
+  mygam <- gamm4(as.formula(form1), random = as.formula(nstv), data = dat)
+  
+  return(mygam)
+}
+```
+
+```{r, Visualization of MixedModel, echo=FALSE}
+
+Gamm4.vis <- function(allgfagam2,data,xvari,yvar,idv,covs,xlabel,ylabel){
+  
+  xvar <- which(colnames(data)==xvari)
+  
+  # setting up the data frame    
+  plot.df <- data.frame(GFA = rep(seq(min(data[,xvar]), max(data[,xvar]), length.out=200),2), female=rep(levels(as.factor(data$female)) , each=200) )
+  colnames(plot.df)[1] <- names(data[xvar])
+  
+  # setting up the covariates
+  cvar <- idv[!(colnames(data[c(idv)]) %in% xvari)]
+  cvar <- c("age",cvar)
+  avdata <- data.frame(rep.row(colMeans(data[,cvar]),400))
+  colnames(avdata)<- names(data[,cvar])
+  
+  # Factor Variables:
+  fvar <- covs[!(colnames(data[c(covs)]) %in% "age")]
+  # populate the factors:
+  initdata <- facdata <- data[5,fvar]
+  for(i in 1:199){
+    facdata <- rbind(facdata,initdata)
+  }
+  
+  plot.df <- cbind(plot.df,avdata,row.names = NULL)
+  plot.df <- cbind(plot.df,facdata,row.names = NULL)
+  
+  plot.df = cbind(plot.df, as.data.frame(predict( allgfagam2$gam, plot.df, se.fit = T)))
+  pre.gamm.plot = plot.df
+  pre.gamm.plot$se = pre.gamm.plot$se.fit
+  # print(names(pre.gamm.plot))
+  
+  myplot <- ggplot(data=pre.gamm.plot, aes(x=pre.gamm.plot[,1],y=fit)) + geom_line(aes(y=fit,col=factor(female)), size=1) + geom_line(aes(y=fit+2*se,col=factor(female)), linetype="dashed") + xlab(xlabel) + ylab(ylabel)  + geom_line(aes(y=fit-2*se,col=factor(female)), linetype="dashed") + scale_colour_discrete(labels =c("Male", "Female")) + ylim(-1, 1) + guides(color=guide_legend("Sex")) 
+  
+  return(myplot)
+  
+}
+
+```
+
+
+```{r Get the ABCD data and prepare for Gamm4,fig.height = 8, fig.width = 8, echo = FALSE }
+
+###################################
+###################################
+## Load and manipulate ABCD data ##
+###################################
+###################################
+
+# load the ABCDGFA
+# load the GFAs
+mydir <- c("/Users/mpaulus/Dropbox (LIBR)/ABCD_RELEASE_1/MediaActivity")
+myall <- paste(mydir,"/ABCD_nda17_GFA_02.15.2018",".RData",sep="")
+load(myall)
+mynames <- names(abcdmediaGFA)
+
+# Recoding levels:
+abcdmediaGFA$high.educ <- factor(abcdmediaGFA$high.educ,levels(factor(abcdmediaGFA$high.educ))[c(3,1,2,4,5,6)])
+abcdmediaGFA$highest.household.income <- factor(abcdmediaGFA$highest.household.income,levels(factor(abcdmediaGFA$highest.household.income))[c(2,4,3,1)])
+
+# Get all the different variables for the GAMM4 models:
+basicvars <- c("age","anthroweight1lb","anthro_1_height_in",
+               "demo_prnt_age_v2")
+screentimevars <- c("wkd_screentime","wnd_screentime","weekscreentime")
+psbvars <- mynames[intersect(grep("psb\\_",mynames),grep("mean$",mynames))]
+crpbivars <- mynames[grep("crpbi",mynames)]
+fcvars <- mynames[grep("fes\\_",mynames)]
+pmqvars <- mynames[intersect(grep("pmq",mynames),grep("mean$",mynames))]
+cogvars <- c(mynames[intersect(grep("nihtbx",mynames),grep("ed$",mynames))],
+             mynames[grep("pea",mynames)])
+demovars <- c("age","female","race.ethnicity","high.educ","married",
+              "highest.household.income","anthro_1_height_in","anthroweight1lb","demo_prnt_age_v2")
+physical <- c("physical_activity1_y","physical_activity2_y","physical_activity5_y")
+cbclvars <- mynames[intersect(grep("cbcl",mynames),grep("t$",mynames))]
+
+# Sleep variables
+sleepvars <- mynames[grep("sds\\_",mynames)]
+sleepvars <- sleepvars[-grep("nt$",sleepvars)]  
+sleepvars <- sleepvars[-grep("nm$",sleepvars)]  
+
+# Family Conflict Variables
+fcvarsR <- c("fes_y_ss_fc","fes_p_ss_fc")
+
+# Screen Variables:
+screenvars <- mynames[intersect(grep("screen",mynames),grep("y$",mynames))]
+screenlabels <- c("WKD_tv_movie","WKD_video","WKD_games","WKD_text","WKD_network","WKD_chat","WND_tv_movie","WND_video","WND_games","WND_text","WND_network","WND_chat","ANY_mature","ANY_Rmovie")
+
+# Rename the variables for the GAMM4 models:
+sGFA <- c("GFA2","GFA1","GFA12","GFA13","GFA4","GFA3","GFA11","GFA16")
+sGFAselectLabel <- c("P_1","CMP","GMA","SM","C_1","C_2","P_2","MP")
+names(abcdmediaGFA)[match(sGFA,names(abcdmediaGFA))] <- sGFAselectLabel
+mynames <- names(abcdmediaGFA)
+
+
+```
+
+R Code
+```{r , Recode Screen variables, fig.height = 6, fig.width = 8, echo= FALSE}
+
+for(i in 1:6){
+  alls <- paste("allscreen",i,sep="")
+  abcdmediaGFA <- cbind(abcdmediaGFA, (5/7) * abcdmediaGFA[,screenvars[i]] + (2/7) * abcdmediaGFA[,screenvars[i+5]])
+  colnames(abcdmediaGFA)[290+i] <- alls
+}
+
+```
+
+R Code:  
+```{r , Mixed Model, fig.height = 6, fig.width = 8, echo= FALSE}
+##########################
+##########################
+## Fit Models in GAMM4  ##
+##########################
+##########################
+
+# Use this code for visualization:
+# https://github.com/PennBBL/groupAnalysis/wiki/Generalized-Additive-Mixed-Effects-Models
+
+# Complete Model: 1,6,11,9,2,13,3,14
+
+# Select covariates:
+names(abcdmediaGFA)[names(abcdmediaGFA)=="highest.household.income"] <- "HHInc"
+covars <- c("age","female","race.ethnicity","high.educ","married","HHInc","demo_prnt_age_v2","cbcl_scr_syn_internal_t","cbcl_scr_syn_external_t","nihtbx_fluidcomp_agecorrected","nihtbx_cryst_agecorrected")
+
+## Select the nesting variables: site and twin status
+nestvars <- c("site_name","FamilyID")
+
+## Select dependent variables
+depvars <- c(physical,fcvarsR,sleepvars)
+deplabels <- c("Days Physically Active","Muscle Strength Activity","PE days in a week",
+               "Family Environment Conflict YOUTH","Family Environment Conflict PARENT","SDS Initiation & Maintenance","SDS Sleep Breathing Disorder","SDS Arousal Disorder","SDS Sleep Wake Transition","SDS Excessive Somonolence","SDS Hyperhydrosis","SDS Total")
+
+## Select IVs
+indepvars <- c("allscreen1","allscreen2","allscreen3","allscreen4","allscreen5","allscreen6")
+GFAselectLabel <- c("TVpDay","VideopDay","GamespDay","TextpDay","NetworkpDay","ChatpDay")
+
+names(abcdmediaGFA)[match(indepvars,names(abcdmediaGFA))] <- GFAselectLabel
+indepvars <- GFAselectLabel
+
+## Form a temporary data frame with the necessary variables
+gamm4data <- abcdmediaGFA[complete.cases(abcdmediaGFA[,c(covars,nestvars,depvars,indepvars)]),
+                          c(covars,nestvars,depvars,indepvars)]
+gamm4dataR <- gamm4data
+gamm4dataR[,c(indepvars,depvars,"cbcl_scr_syn_internal_t","cbcl_scr_syn_external_t","nihtbx_fluidcomp_agecorrected","nihtbx_cryst_agecorrected")] <- scale(gamm4dataR[,c(indepvars,depvars,"cbcl_scr_syn_internal_t","cbcl_scr_syn_external_t","nihtbx_fluidcomp_agecorrected","nihtbx_cryst_agecorrected")])
+
+# Visualizing missing data
+aggr(abcdmediaGFA[,c(covars,nestvars,depvars,indepvars)],col = c("blue","orange"),sortVars=TRUE,prop = FALSE, numbers = TRUE, combined = TRUE, cex.lab = 0.5, cex.axis =0.5, cex.numbers =0.5)
+
+# Name the order of the visualized variables
+gammvars <- c("Intercept","Media1: TVpDay","Media2: VideopDay","Media3: GamespDay","Media4: TextpDay","Media5: NetworkpDay","Media6: ChatpDay",
+              "Youth: Age","Youth: Female",
+              "Race/Ethnicity: Black","Race/Ethnicity: Hisp","Race/Ethnicity:Asian","Race/Ethnicity: Other","Par. Education: < HS","Par. Education: HS","Par. Education: Bachelor",
+              "Par. Education: >Bachelor","Par. Education: Other","Parents Married","Par. Income: 50-100k",
+              "Par. Income: +100k","Par. Income: unkown","Parental Age","CBCL: Internalization","CBCL: Externalization","IQ: Fluid","IQ: Crystalized")
+
+# Loop through all dependent variables:
+
+for(i in 1:length(depvars)){
+# Assign a dependent variable:
+  mydepvar <- depvars[i]
+  mydeplabel <- deplabels[i]
+
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+# gamm4dataR <- abcdmediaGFA[complete.cases(abcdmediaGFA[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+# gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,indepvars,covars,nestvars,gamm4dataR)
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+
+# Visualize the effects:
+# Create a temporary data set
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+# GGplot the coefficients:
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Par. Education: Other", ]) + 
+  aes(x = term, ymin = median - 1.96 * sd, 
+      ymax = median + 1.96 * sd, y = median) + 
+  scale_x_discrete(limits = rev(feEx[feEx$term!= "Intercept" & feEx$term!= "Par. Education: Other",c("term") ])) +
+  geom_pointrange() + 
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) + 
+  coord_flip() + 
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""), 
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+print(gamm4coeff)
+
+# Visualize the marginal effect
+# For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+# mediaGFAs <- c("allscreen1","allscreen2","allscreen3","allscreen4","allscreen5","allscreen6")
+mediaGFAs <- GFAselectLabel <- c("TVpDay","VideopDay","GamespDay","TextpDay","NetworkpDay","ChatpDay")
+plotlist <- list()
+
+# My Marginal Plots
+for(j in 1:length(mediaGFAs)){
+  plotGFA <- mediaGFAs[j]
+  myGFAtitle <- GFAselectLabel[j]
+  p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,indepvars,covars,
+                  myGFAtitle,deplabels[i])
+  plotlist[[j]] <- p1
+}
+
+mygridtitle <- paste("Marginal Effect: ",deplabels[i],sep="")
+grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],plotlist[[5]],plotlist[[6]],ncol = 2,top=mygridtitle)
+
+# Now the same with visreg
+mygamm4GFA$gam$data <- gamm4dataR
+for(j in 1:length(mediaGFAs)){
+  visreg(mygamm4GFA$gam,mediaGFAs[j],xlab=GFAselectLabel[j],ylab=mydeplabel,by="female",strip.names=c("Male", "Female"))
+}
+
+}
+
+# Now generate the plots for the GFAs
+
+depvars <- c("TVpDay","VideopDay","GamespDay","TextpDay","NetworkpDay","ChatpDay")
+deplabels <- c("TVpDay","VideopDay","GamespDay","TextpDay","NetworkpDay","ChatpDay")
+
+gammvars2 <- c("Intercept","Youth: Age","Youth: Female","Race/Ethnicity: Black","Race/Ethnicity: Hisp","Race/Ethnicity:Asian","Race/Ethnicity: Other","Par. Education: < HS","Par. Education: HS","Par. Education: Bachelor","Par. Education: >Bachelor","Par. Education: Other","Parents Married","Par. Income: 50-100k","Par. Income: +100k","Par. Income: unkown","Parental Age","CBCL: Internalization","CBCL: Externalization","IQ: Fluid","IQ: Crystalized")
+
+# Loop through GFAs as dependent variables:
+for(i in 1:length(depvars)){
+# Assign a dependent variable:
+  mydepvar <- depvars[i]
+  mydeplabel <- deplabels[i]
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+print(summary(mygamm4base$gam))
+print(AIC(mygamm4base$mer))
+
+# Visualize the effects:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+# Create a temporary data set
+feEx <- FEsim(mygamm4base$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars2
+
+# GGplot the coefficients:
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Par. Education: Other", ]) + 
+  aes(x = term, ymin = median - 1.96 * sd, 
+      ymax = median + 1.96 * sd, y = median) + 
+  scale_x_discrete(limits = rev(feEx[feEx$term!= "Intercept" & feEx$term!= "Par. Education: Other",c("term") ])) +
+  geom_pointrange() + 
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) + 
+  coord_flip() + 
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""), 
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+print(gamm4coeff)
+
+}
+
+
+```
+
+R Code:  
+```{r , Table with quartiles for General Media and Social Media GFA, eval=TRUE, echo=FALSE, fig.height = 4, fig.width = 5}
+
+# Quartile the Social Media GFA
+abcdmediaGFA$qGFA13 <- as.factor(quantcut(abcdmediaGFA$SM))
+
+# General Sample Characteristics:
+# Need to rename the demographic variables:
+demovars <- c("age","female","race.ethnicity","high.educ","married",
+              "HHInc","anthro_1_height_in","anthroweight1lb","demo_prnt_age_v2")
+
+print("Social Media GFA:")
+print("Demographics")
+
+listvars <- c(demovars)
+catVars = c("female","race.ethnicity","married","high.educ","HHInc")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qGFA13"))
+# print(mytable1)
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+print("Family Conflict")
+
+# Family Conflict
+listvars <- fcvarsR
+catVars = c()
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qGFA13"))
+# print(mytable1)
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+
+print("Sleep")
+# Sleep
+listvars <- c("sds_p_ss_dims")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qGFA13"))
+# print(mytable1)
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+
+# Quartile the General Media GFA
+abcdmediaGFA$qGFA12 <- as.factor(quantcut(abcdmediaGFA$M))
+
+# General Sample Characteristics:
+print("Media GFA:")
+print("Demographics")
+
+listvars <- c(demovars)
+catVars = c("female","race.ethnicity","married","high.educ","HHInc")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qGFA12"))
+# print(mytable1)
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+print("Family Conflict")
+
+# Family Conflict
+listvars <- fcvarsR
+catVars = c()
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qGFA12"))
+# print(mytable1)
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+print("Sleep")
+
+# Sleep
+listvars <- c("sds_p_ss_dims")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qGFA12"))
+# print(mytable1)
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+
+
+```
+
+```{r , Simple Quartile Tables, fig.height = 6, fig.width = 8, echo= FALSE}
+
+# General Sample Characteristics:
+
+listvars <- c(demovars)
+catVars = c("female","race.ethnicity","married","high.educ","HHInc")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("weekf"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Parent Reported Screen Time") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+listvars <- c(physical,fcvarsR,sleepvars)
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("weekf"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Parent Reported Screen Time") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+
+
+# Now for the kids total reported screen activity:
+# Calculate total screen measure
+kidscreentotal <- rowSums(abcdmediaGFA[,screenvars])
+abcdmediaGFA$kidscreentotal <- c(kidscreentotal)
+abcdmediaGFA$qkidscreen <- as.factor(quantcut(abcdmediaGFA$kidscreentotal))
+
+listvars <- c(demovars)
+catVars = c("female","race.ethnicity","married","high.educ","HHInc")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qkidscreen"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Total Youth Reported Screen Activity") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+listvars <- c(physical,fcvarsR,sleepvars)
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediaGFA,factorVars=catVars,strata=c("qkidscreen"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Total Youth Reported Screen Activity") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+```
+

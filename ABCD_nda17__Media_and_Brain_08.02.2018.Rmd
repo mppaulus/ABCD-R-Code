@@ -1,0 +1,1442 @@
+---
+title: "Media Activity and Brain updated Version (Official Release)"
+author: "Martin P Paulus"
+date: "5/18/2018"
+output: 
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: cerulean
+word_document: default
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+# For Markdown examples look up: https://rmarkdown.rstudio.com/html_document_format.html#overview
+
+# Example Libraries to use:
+library(psych)
+library(tableone)
+library(glmnet)
+library(MASS)
+# library(mice)
+library(ggplot2)
+library(gridExtra)
+library(scales)
+library(vcd)
+library(GFA)
+library(Hmisc)
+library(gtools)
+library(RColorBrewer)
+library(corrplot)
+library(data.table)
+library(VIM)
+
+#Wes' Libraries:
+library(plotly)
+library(plotrix)
+library(gamm4)
+
+# Library to visualize Mixed Effects Models:
+library(merTools)
+
+# To produce nice tables:
+# https://cran.r-project.org/web/packages/kableExtra/vignettes/awesome_table_in_html.html
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+
+```
+
+```{r Common Code, echo=TRUE}
+
+# Common functions for analyses
+
+vis.W <- function(res,comp.use,block.names=NULL,pct.CI, GFAlabel) {
+  if (!is.na(pct.CI)){
+    lo = (1-pct.CI)/2
+    up = 1 - lo
+    cred.int <- apply(res$posterior$W[,,comp.use], 2:3, function(x) quantile(x, c(lo, up)))
+    x <- res$W[,comp.use] * (apply(cred.int, 2:3, prod)>0)*1
+  } else { 
+    x <- res$W[,comp.use] 
+  }
+  colnames(x) <- GFAlabel
+  D <- nrow(x); K <- ncol(x)
+  gr <- res$groups; M <- length(gr)
+  if (is.null(block.names)) { names(gr) <- paste("Source",1:M) }
+  else { names(gr) <- block.names }
+  gr1 <- c(0,cumsum(sapply(gr,length))); names(gr1) <- c(names(gr),"NA")
+  
+  mar <- c(6,4,4,6)
+  par(mar=mar)
+  cols <- colorRampPalette(c("orange","red","white","blue","cyan"))(19)
+  if(any(is.na(x))) cols <- colorRampPalette(c("orange","red","#DDDDDD","blue","cyan"))(19)
+  M <- max(abs(x),na.rm=T)
+  breaks <- seq(-M,M,length=20)
+  
+  title <- c("GFA Matrix","Components","Features")
+  if (length(comp.use)==res$K){
+    title[1] <- paste0(title[1], ' (all components & ', sum(x), ' loadings)')
+  }
+  if (!is.na(pct.CI)){
+    title[1] <- paste0(title[1], ' (', sum(x!=0),' loadings: ',pct.CI*100,'% Credible Interval)')
+  }
+  image(1:D,1:K,x[,K:1],col=cols,breaks=breaks,axes=F,main=title[1],
+        xlab="",ylab="")
+  title(xlab=title[3],line=mar[1]-1)
+  title(ylab=title[2],line=mar[2]-1)
+  box()
+  par(las=2)
+  axis(1, 1:D, rownames(x), cex.axis=D^(-1/5))
+  axis(2, K:1, colnames(x), cex.axis=K^(-1/5))
+  
+  #Grouping
+  par(xpd=T)
+  mu <- gr1[-1]/2+gr1[-length(gr1)]/2
+  N <- K
+  for(i in 1:length(mu)) {
+    if(i!=length(mu)) lines(rep(gr1[i+1]+1/2,2), c(.5, N*1.03+.5), lwd=2)
+    text(mu[i],N*1.03+.5,names(gr1)[i])
+  }
+  #Colorbar
+  n <- length(cols)
+  cba <- D + 1/2 + D/60; cbw <- D/40
+  for(i in 1:n){
+    polygon(c(0,cbw,cbw,0)+cba, c(0,0,N/n,N/n)+N*(i-1)/n+1/2,
+            col=cols[i], border=NA)
+  }
+  #Colorbar: axis
+  lines(rep(cba+cbw,2),c(0,N)+1/2)
+  m <- 10^floor(log10(M)); m <- floor(M/m)*m
+  for(l in c(-m,0,m)) {
+    ly <- N*(l/M/2+.5)+1/2
+    lines(cba+cbw-c(cbw,-cbw)/5, rep(ly,2))
+    text(cba+cbw*2.5,ly,l)
+  }
+  par(xpd=F)
+}
+
+## @knitr repRow
+
+# Need this function
+rep.row<-function(x,n){
+  matrix(rep(x,each=n),nrow=n)
+}
+
+## @knitr myGamm
+myGAMM4 <- function(dv,iv,cv,nv,dat)
+{
+  
+  indv <- paste(iv, collapse=" + ")
+  cova <- paste(cv, collapse=" + ")
+  nstv <- paste("~","(","1","|",nv[1],"/",nv[2],")",sep="")
+  
+  datnames <- names(dat)
+  
+  if(iv %in% datnames) {
+    form1 <- paste(dv," ~ ",indv," + ",cova,sep="")
+  } else { form1 <- paste(dv," ~ ",cova,sep="")}
+  
+  # print(form1)
+  # print(nstv)
+  
+  mygam <- gamm4(as.formula(form1), random = as.formula(nstv), data = dat)
+  
+  return(mygam)
+}
+
+## @knitr GammaVis
+
+Gamm4.vis <- function(allgfagam2,data,xvari,yvar,idv,covs,xlabel,ylabel){
+  
+  xvar <- which(colnames(data)==xvari)
+  
+  # setting up the data frame    
+  plot.df <- data.frame(GFA = rep(seq(min(data[,xvar]), max(data[,xvar]), length.out=200),2), female=rep(levels(as.factor(data$female)) , each=200) )
+  colnames(plot.df)[1] <- names(data[xvar])
+  
+  # setting up the covariates
+  cvar <- idv[!(colnames(data[c(idv)]) %in% xvari)]
+  cvar <- c("age",cvar)
+  avdata <- data.frame(rep.row(colMeans(data[,cvar]),400))
+  colnames(avdata)<- names(data[,cvar])
+  
+  
+  # Factor Variables:
+  fvar <- covs[!(colnames(data[c(covs)]) %in% "age")]
+  # populate the factors:
+  initdata <- facdata <- data[5,fvar]
+  for(i in 1:199){
+    facdata <- rbind(facdata,initdata)
+  }
+  
+  plot.df <- cbind(plot.df,avdata,row.names = NULL)
+  plot.df <- cbind(plot.df,facdata,row.names = NULL)
+  
+  plot.df = cbind(plot.df, as.data.frame(predict( allgfagam2$gam, plot.df, se.fit = T)))
+  pre.gamm.plot = plot.df
+  pre.gamm.plot$se = pre.gamm.plot$se.fit
+  # print(names(pre.gamm.plot))
+  
+  myplot <- ggplot(data=pre.gamm.plot, aes(x=pre.gamm.plot[,1],y=fit)) + geom_line(aes(y=fit,col=factor(female)), size=1) + geom_line(aes(y=fit+2*se,col=factor(female)), linetype="dashed") + xlab(xlabel) + ylab(ylabel)  + geom_line(aes(y=fit-2*se,col=factor(female)), linetype="dashed") + scale_colour_discrete(labels =c("Male", "Female")) + ylim(-1, 1) + guides(color=guide_legend("Sex"))
+  
+  return(myplot)
+  
+}
+
+## @knitr VarExp
+
+# Variance explained by GFA
+
+var.exp <- function(res, elbow){
+  ps.mean.W <- apply(res$posterior$W, 2:3, mean)
+  ve <- colMeans(ps.mean.W^2)*100
+  tmp <- ve[order(-ve)]
+  cum.sum <- cumsum(tmp)
+  
+  print(paste0('All ',res$K, ' components explain ', round(sum(tmp),1),'% variance'))
+  
+  plot(1:length(tmp), tmp, 
+       xlab='Ordered component', ylab='% variance', type='b',
+       main='Components by Variance Explained')
+  abline(h=tmp[elbow], lty=2)
+  plot(1:length(tmp), cum.sum, type='b', xlab='Ordered component', 
+       ylab='Cumulative % variance explained', 
+       main=paste0('The ', elbow, ' components explain ', round(cum.sum[elbow],1), '% variance'))
+  abline(h=cum.sum[elbow], v=elbow, lty=2) 
+  plot(1:length(ve), ve, xlab='Component', ylab='% variance', type='b',
+       main='Components as extracted in GFA')
+  abline(h=tmp[elbow], lty=2)
+  # return(round(ve,1))
+  use <- order(-ve)[1:elbow]
+  use <- cbind(use,tmp[1:elbow])
+  return(use)
+}
+
+# Circular Plot of the GFA Data
+Circbar <- function(mydata, ebar,graphtitle){
+  
+  data <- mydata
+  
+  # Assign min and max
+  
+  mymin <- ifelse(-1.5 + min(mydata$CI025) < -2.5,-1.5 + min(mydata$CI025),-2.5)
+  mymax <- 1+ max(mydata$CI975)
+  
+  # Set a number of 'empty bar' to add at the end of each group
+  empty_bar <- ebar
+  
+  to_add = data.frame( matrix(NA, empty_bar*nlevels(data$GFAgroups), ncol(data)) )
+  colnames(to_add) = colnames(data)
+  to_add$GFAgroups=rep(levels(data$GFAgroups), each=empty_bar)
+  data=rbind(data, to_add)
+  data=data %>% arrange(GFAgroups)
+  data$id=seq(1, nrow(data))
+  
+  # Get the name and the y position of each label
+  label_data=data
+  number_of_bar=nrow(label_data)
+  angle= 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+  label_data$hjust<-ifelse( angle < -90, 1, 0)
+  label_data$angle<-ifelse(angle < -90, angle+180, angle)
+  
+  # prepare a data frame for base lines
+  base_data=data %>%
+    group_by(GFAgroups) %>%
+    summarize(start=min(id), end=max(id) - empty_bar) %>%
+    rowwise() %>%
+    mutate(Title=mean(c(start, end)))
+  
+  # prepare a data frame for grid (scales)
+  grid_data = base_data
+  grid_data$end = grid_data$end[ c( nrow(grid_data), 1:nrow(grid_data)-1)] + 1
+  grid_data$start = grid_data$start - 1
+  #grid_data=grid_data[-1,]
+  
+  # Make the plot
+  p = ggplot(data, aes(x=as.factor(id), y=Median, fill=GFAgroups)) +       
+    # Note that id is a factor. If x is numeric, there is some space between the first bar
+    
+    geom_bar(aes(x=as.factor(id), y=Median, fill=GFAgroups), stat="identity", alpha=0.5)  +
+    geom_errorbar(aes(x=as.factor(id),ymin=CI025,ymax=CI975,color="Gray")) +
+    
+    # Add a level lines.
+    geom_segment(data=grid_data, aes(x = end, y = min(mydata$CI025), xend = start, yend = min(mydata$CI025)), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+    geom_segment(data=grid_data, aes(x = end, y = max(mydata$CI975), xend = start, yend = max(mydata$CI975)), colour = "grey", alpha=1, size=0.3 , inherit.aes = FALSE ) +
+    
+    # Add text showing the value of each level lines
+    annotate("text", x = rep(max(data$id),3), y = c(min(mydata$CI025),0, max(mydata$CI975)), label = format(c(min(mydata$CI025),0, max(mydata$CI975)),digits=2) , color="black", size=3 , angle=0, fontface="bold", hjust=1) +
+    
+    ylim(mymin,mymax) +
+    theme_minimal() +
+    theme(
+      legend.position = "none",
+      axis.text = element_blank(),
+      axis.title = element_blank(),
+      panel.grid = element_blank(),
+      plot.margin = unit(rep(-1,4), "cm")
+    ) +
+    coord_polar() +
+    geom_text(data=label_data, aes(x=id, y=mymax-.9, label=GFAvarlabs, hjust=hjust), color="black", fontface="bold",alpha=0.6, size=2.5, angle= label_data$angle, inherit.aes = FALSE )  +
+    
+    # Add base line information
+    geom_segment(data=base_data, aes(x = start, y = -1.1 , xend = end, yend = -1.1, colour=GFAgroups), alpha=0.8, size=1 , inherit.aes = FALSE )  +
+    
+    geom_segment(data=base_data, aes(x = start, y = 0 , xend = end, yend = 0), colour = "Gray", alpha=0.8, size=0.6 , inherit.aes = FALSE )  +
+    
+    geom_text(data=grid_data, aes(x = Title, y = -1.4, label=GFAgroups),color="black", fontface="bold") +
+    
+    annotate("text", x = 0, y = -2.1, label = c(graphtitle) , color="red", size=6 , fontface="bold")
+  
+  return(p)
+  
+}
+
+
+
+```
+
+```{r , Load the data set that has all the necessary info and GFAs, eval=TRUE, echo=TRUE}
+
+# load the GFAs
+mydir <- getwd()
+myall <- paste(mydir,"/ABCD_nda17_GFA_02.15.2018",".RData",sep="")
+load(myall)
+
+# load the brain variables:
+myall <- paste(mydir,"/abcd_fs_sulc_ct_cv_qc03.02.2018",".RData",sep="")
+load(myall)
+
+# load brain mean variables:
+myall <- paste(mydir,"/abcd_fs_covars_03.15.2018",".RData",sep="")
+load(myall)
+
+# Merge the Screen data and the brain data:
+abcdmediabrain <- merge(abcdmediaGFA,abcdbrain,by="src_subject_id",all=FALSE)
+
+# Merge the Screen data and the brain data:
+abcdmediabrain <- merge(abcdmediabrain,abcdchunk,by="src_subject_id",all=FALSE)
+
+mynames <- names(abcdmediabrain)
+
+# Calculate BMI:
+abcdmediabrain$bmi <- (abcdmediabrain$anthroweight1lb/(abcdmediabrain$anthro_1_height_in *abcdmediabrain$anthro_1_height_in)) *703
+
+# Recoding levels:
+abcdmediabrain$high.educ <- factor(abcdmediabrain$high.educ,levels(factor(abcdmediabrain$high.educ))[c(3,1,2,4,5,6)])
+abcdmediabrain$highest.household.income <- factor(abcdmediabrain$highest.household.income,levels(factor(abcdmediabrain$highest.household.income))[c(2,4,3,1)])
+
+# Screen Variables:
+screenvars <- mynames[intersect(grep("screen",mynames),grep("y$",mynames))]
+screenlabels <- c("Weekday_tv_movie","Weekday_video","Weekday_games","Weekday_text","Weekday_network","Weekday_chat","Weekend_tv_movie","Weekend_video","Weekend_games","Weekend_text","Weekend_network","Weekend_chat","ANY_mature","ANY_Rmovie")
+
+setnames(abcdmediabrain, old=c(screenvars), new=c(screenlabels))
+screenvars <- screenlabels
+
+# Get all the different variables:
+basicvars <- c("age","anthroweight1lb","anthro_1_height_in",
+               "demo_prnt_age_v2","bmi")
+screentimevars <- c("wkd_screentime","wnd_screentime","weekscreentime")
+psbvars <- mynames[intersect(grep("psb\\_",mynames),grep("mean$",mynames))]
+crpbivars <- mynames[grep("crpbi",mynames)]
+fcvars <- mynames[grep("fes\\_",mynames)]
+pmqvars <- mynames[intersect(grep("pmq",mynames),grep("mean$",mynames))]
+cogvars <- c(mynames[intersect(grep("nihtbx",mynames),grep("ed$",mynames))],
+             mynames[grep("pea",mynames)])
+demovars <- c("age","female","race.ethnicity","high.educ","married",
+              "highest.household.income","anthro_1_height_in","anthroweight1lb","bmi",
+              "demo_prnt_age_v2")
+physical <- c("physical_activity1_y","physical_activity2_y","physical_activity5_y")
+cbclvars <- mynames[intersect(grep("cbcl",mynames),grep("t$",mynames))]
+sleepvars <- mynames[grep("sds\\_",mynames)]
+sleepvars <- sleepvars[-grep("nt$",sleepvars)]  
+sleepvars <- sleepvars[-grep("nm$",sleepvars)]  
+
+# Need to remove the covariate variables:
+# Sulcal Variables
+sulcvars <- mynames[grep("sulc",mynames)]
+sulcvars <- sulcvars[-grep("mean",sulcvars)]
+# Thickness Variables
+thickvars <- mynames[grep("^ct_",mynames)]
+thickvars <- thickvars[-grep("mean",thickvars)]
+# Volume Variables
+volvars <- mynames[grep("^cv_",mynames)]
+volvars <- volvars[-grep("total",volvars)]
+
+# FS Mean variables
+fsmeanvars <- c("cv_ctx_lh_total","cv_ctx_rh_total","cv_ctx_total","crt_sulcctxlhmean",
+               "crt_sulcctxrhmean","crt_sulcctxmean","ct_lh_mean","ct_rh_mean","ct_mean","intracranialvolume")
+# Quality Control Variables
+qcvars <- mynames[grep("fsqc_qc",mynames)]
+
+# Compare the data with and without passing:
+listvars <- c(demovars,screentimevars)
+catVars = c("female","race.ethnicity","married","high.educ","highest.household.income")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediabrain,factorVars=catVars,strata=c("fsqc_qc"))
+# print(mytable1)
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Youth Reported Weekday Screen Time") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+# limit all subsequent analyses to only those subjects that passed the FS quality check:
+abcdmediabrain_qc <- abcdmediabrain[which(abcdmediabrain$fsqc_qc == "pass"),]
+```
+
+```{r, rename Freesurfer labels, echo=TRUE}
+
+mydir <- getwd()
+myall <- paste(mydir,"/desikanlabels",".csv",sep="")
+desikan <- read.csv(myall,header=TRUE)
+
+# reorder the thickness variables
+
+myvector <- NULL
+for(i in 1:length(thickvars)){
+  myindex <- which(desikan == thickvars[i],arr.ind = TRUE)
+  myvector <- c(myvector,myindex[1,1])
+}
+thickorder <- myvector
+
+# reorder the sulcal variables
+myvector <- NULL
+
+for(i in 1:length(sulcvars)){
+  myindex <- which(desikan == sulcvars[i],arr.ind = TRUE)
+  myvector <- c(myvector,myindex[1,1])
+}
+sulcorder <- myvector
+
+# reorder the volume variables
+myvector <- NULL
+
+for(i in 1:length(volvars)){
+  myindex <- which(desikan == volvars[i],arr.ind = TRUE)
+  myvector <- c(myvector,myindex[1,1])
+}
+volorder <- myvector
+
+thickvars_r <- desikan[,6]
+thickvars_r <- thickvars_r[!is.na(thickvars_r)]
+thicklabels <- paste(desikan[,2],desikan[,3],"TH ",sep=" ")
+thicklabels <- thicklabels[-grep("Insula",thicklabels)]
+sulcvars_r <- desikan[,5]
+sulclabels <- paste(desikan[,2],desikan[,3],"SD ",sep=" ")
+volvars_r <- desikan[,7]
+volvars_r <- volvars_r[!is.na(volvars_r)]
+vollabels <- paste(desikan[,2],desikan[,3],"GV ",sep=" ")
+vollabels <- vollabels[-grep("Insula",vollabels)]
+
+
+```
+
+```{r, convert factor variables to numeric variables, echo=TRUE}
+
+# Sulcus variables
+calcdata <- abcdmediabrain_qc[, !(colnames(abcdmediabrain_qc) %in% sulcvars), drop=FALSE] 
+interim <- abcdmediabrain_qc[sulcvars]
+interim <- lapply(interim,function(x)as.numeric(as.character(x)))
+calcdata <- cbind(calcdata,interim)
+
+# Thickness variables
+calcdata <- calcdata[, !(colnames(calcdata) %in% thickvars), drop=FALSE] 
+interim <- abcdmediabrain_qc[thickvars]
+interim <- lapply(interim,function(x)as.numeric(as.character(x)))
+calcdata <- cbind(calcdata,interim)
+
+# Volume variables
+calcdata <- calcdata[, !(colnames(calcdata) %in% volvars), drop=FALSE] 
+interim <- abcdmediabrain_qc[volvars]
+interim <- lapply(interim,function(x)as.numeric(as.character(x)))
+calcdata <- cbind(calcdata,interim)
+
+# FS Mean variables
+calcdata <- calcdata[, !(colnames(calcdata) %in% fsmeanvars), drop=FALSE] 
+interim <- abcdmediabrain_qc[fsmeanvars]
+interim <- lapply(interim,function(x)as.numeric(as.character(x)))
+calcdata <- cbind(calcdata,interim)
+
+# Sleep variables
+calcdata <- calcdata[, !(colnames(calcdata) %in% sleepvars), drop=FALSE] 
+interim <- abcdmediabrain_qc[sleepvars]
+interim <- lapply(interim,function(x)as.numeric(as.character(x)))
+calcdata <- cbind(calcdata,interim)
+
+```
+
+```{r, relabel the calcdata data set}
+
+names(calcdata)[match(c(as.character(thickvars_r)),names(calcdata))] <- thicklabels
+names(calcdata)[match(c(as.character(sulcvars_r)),names(calcdata))] <- sulclabels
+names(calcdata)[match(c(as.character(volvars_r)),names(calcdata))] <- vollabels
+
+```
+
+This table shows the general demographics of the ABCD sample as a function of youth reported weekday and weekend screen time.  First, there was no difference in average age across the quartiles of screen time.  Second, females were less frequent in the higher quartiles.  Third, minority youth reported significantly higher screen time use.  Fourth, youth in the highest quartile had significantly higher frequency of non-married parents.  Fifth, lower household income families were over-represented in the higher quartiles.  Sixth, youth in the higher quartile had significantly higher weights.  Lastly, parents of youth in the higher quartiles were slightly younger.
+```{r , General Table, echo=TRUE}
+
+### As a function of youth reported screen variables
+
+interim <- abcdmediabrain_qc[c(colnames(abcdmediabrain_qc) %in% screenvars)]
+interim <- as.data.frame(lapply(interim,function(x)as.numeric(as.character(x))))
+wkd_y_screentime <- rowSums(interim[,c(1:6)])
+wnd_y_screentime <- rowSums(interim[,c(7:12)])
+
+total_y_screentime <- 5*wkd_y_screentime + 2*wnd_y_screentime
+
+calcdata <- cbind(calcdata,wkd_y_screentime)
+calcdata <- cbind(calcdata,wnd_y_screentime)
+calcdata <- cbind(calcdata,total_y_screentime)
+
+# Quartile the calcdata
+calcdata$qwkd_y_screentime <- as.factor(quantcut(calcdata$wkd_y_screentime))
+calcdata$qwnd_y_screentime <- as.factor(quantcut(calcdata$wnd_y_screentime))
+calcdata$qtotal_y_screentime <- as.factor(quantcut(calcdata$total_y_screentime))
+
+# General Sample Characteristics:
+
+listvars <- c("wkd_y_screentime",demovars)
+catVars = c("female","race.ethnicity","married","high.educ","highest.household.income")
+mytable1 <- CreateTableOne(vars = listvars,data=calcdata,factorVars=catVars,strata=c("qwkd_y_screentime"))
+# print(mytable1)
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Youth Reported Weekday Screen Time") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+listvars <- c("wnd_y_screentime",demovars)
+catVars = c("female","race.ethnicity","married","high.educ","highest.household.income")
+mytable1 <- CreateTableOne(vars = listvars,data=calcdata,factorVars=catVars,strata=c("qwnd_y_screentime"))
+# print(mytable1)
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Youth Reported Weekend Screen Time") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+
+listvars <- c("total_y_screentime",demovars)
+catVars = c("female","race.ethnicity","married","high.educ","highest.household.income")
+mytable1 <- CreateTableOne(vars = listvars,data=calcdata,factorVars=catVars,strata=c("qtotal_y_screentime"))
+# print(mytable1)
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Quartiles of Youth Reported Total Screen Time") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+```
+
+This table and figures show the statistics for the FreeSurfer variables after excluding all subjects that did not pass the FreeSurfer Quality Control, which left n=4277.  First, boxplots show similar distributions across different brain areas and across measurements. Sulcal depth was distributed around zero with both positive and negative values.  Third, there is large variability across areas for the volume, which is to be expected based on the parcellation.  Fourth, a total of n=10 missing cases of the different sleep variables of the SDS.
+
+```{r, FS Variables Tables and Boxplots, echo=TRUE, fig.height = 8, fig.width = 6}
+
+# Form interim data sets:
+
+# Thickness variables:
+mydata <- melt(calcdata,id = "src_subject_id",measure.vars = thicklabels)
+
+# Table that includes missing values
+kable(t(summary(calcdata[,c(thicklabels)])),"html",caption = "Cortical Thickness") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+myFSplot <- ggplot(data = mydata, aes(variable,value)) + theme_classic() + geom_boxplot(outlier.size=.5,outlier.colour="darkgrey",fill='#A4A4A4') + 
+ coord_flip() + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.6))) + ggtitle("Cortical Thickness")
+
+print(myFSplot)
+
+# Sulcal variables:
+mydata <- melt(calcdata,id = "src_subject_id",measure.vars = sulclabels)
+
+# Table that includes missing values
+kable(t(summary(calcdata[,c(sulclabels)])),"html",caption = "Sulcal Depth") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+myFSplot <- ggplot(data = mydata, aes(variable,value)) + theme_classic() + geom_boxplot(outlier.size=.5,outlier.colour="darkgrey",fill='#A4A4A4') + coord_flip() + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.6))) + ggtitle("Sulcal Depth")
+
+print(myFSplot)
+
+# Thickness variables:
+mydata <- melt(calcdata,id = "src_subject_id",measure.vars = vollabels)
+
+# Table that includes missing values
+kable(t(summary(calcdata[,c(vollabels)])),"html",caption = "Volume") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+myFSplot <- ggplot(data = mydata, aes(variable,value)) + theme_classic() + geom_boxplot(outlier.size=.5,outlier.colour="darkgrey",fill='#A4A4A4') + coord_flip() + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.6))) + ggtitle("Brain Structure Volumes")
+
+print(myFSplot)
+
+
+# Sleep variables:
+mydata <- melt(calcdata[complete.cases(calcdata),],id = "src_subject_id",measure.vars = sleepvars)
+
+# Table that includes missing values
+kable(t(summary(calcdata[,c(sleepvars)])),"html",caption = "Volume") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+myFSplot <- ggplot(data = mydata, aes(variable,value)) + theme_classic() + geom_boxplot(outlier.size=.5,outlier.colour="darkgrey",fill='#A4A4A4') + coord_flip() + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.6))) + ggtitle("SDSC Sleep Variables")
+
+print(myFSplot)
+
+
+# FS Mean Variables
+plotlist <- list()
+
+for(i in 1:length(fsmeanvars)){
+mydata <- melt(calcdata[complete.cases(calcdata),],id = "src_subject_id",measure.vars = fsmeanvars[i])
+
+mpptitle <- paste("FS Covariate Variables: ",fsmeanvars[i],sep ="")
+p1 <- ggplot(data = mydata, aes(value)) + theme_classic() +
+ geom_histogram(colour="black", fill="white")+
+ geom_density(alpha=.2, fill="#FF6666") + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.6))) + ggtitle(mpptitle)
+plotlist[[i]] <- p1
+
+}
+
+mygridtitle <- paste("Mean FS Covariate Plots: ",sep="")
+grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],
+             plotlist[[5]],plotlist[[6]],plotlist[[7]],plotlist[[8]],
+             plotlist[[9]],plotlist[[10]],
+             ncol = 2,top=mygridtitle)
+
+
+```
+
+These figures show the correlation matrices for media variables, cortical thickness, sulcal depth, and volume.  The matrices show the degree of correlation as ellipses with color coded directionality, i.e. blue indicates positive correlations and red indicates negative correlations.  Whereas both media variable, cortical thickness, and volumes are highly intercorrelated, sulcal depth shows relatively low inter-correlations. The combined correlation matrix shows that variables are relatively strongly correlated within a block but weakly correlated across block with sulcal depth being the exception. 
+
+```{r , Correlation Plots before GFA, echo=TRUE, fig.height = 12, fig.width = 12  }
+# Set up the data:
+
+
+MEDIA <- as.matrix(calcdata[,c(screenvars)])
+THICK <- as.matrix(calcdata[,c(thicklabels)])
+SULC <- as.matrix(calcdata[,c(sulclabels)])
+VOL <- as.matrix(calcdata[,c(vollabels)])
+
+colnames(MEDIA) <- screenlabels
+
+corM <- cor(MEDIA, method='spearman', use='pair')
+corrplot::corrplot.mixed(corM,title = "Media Variables", lower = "number",upper = "ellipse",lower.col = "black",tl.pos = "lt",tl.cex = .5,number.cex = .5,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(THICK, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Cortical Thickness Variables", method='ellipse',
+                   addgrid.col = NA,tl.cex = .4,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(SULC, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Sulcal Depth Variables", method='ellipse',addgrid.col = NA, tl.cex = .4,tl.col = "black",mar=c(0,0,1,0))
+
+corM <- cor(VOL, method='spearman', use='pair')
+corrplot::corrplot(corM, title = "Volume Variables", method='ellipse',
+                   addgrid.col = NA, tl.cex = .4,tl.col = "black",mar=c(0,0,1,0))
+
+tmp <- cbind(MEDIA,THICK,SULC,VOL)
+corM <- cor(tmp, method='spearman', use='pair')
+
+corrplot::corrplot(corM, title = "Combined Variables", method='ellipse',
+                   addgrid.col = NA, tl.cex = .3,tl.col = "black",mar=c(0,0,1,0))
+
+```
+
+The GFA extracted 132 components accounting for 58 percent of the variance.  There are several components that integrate across blocks.  The first component, which accounts for about 15 percent of the variance, shows a positive loading on screen media activity and a negative loading on both cortical thickness and volume with a mixed loading on sulcal depth.  The second component, which accounts for 9 percent of the variance loaded on a few media vriables with a negative loading on thickness but a positive loading on volume and a mixed loading on sulcal depth.  The third component, which accounts for 2 percent of the variance, loaded strongly on media activity with mixed and selective loadings on cortical thickness, sulcal depth, and volumes.  The fifth component, which accounts for 1.8 percent of the variance, also loaded strongly on screen media activity and selectively on some areas for cortical thickness, sulcal depth and volumes.  
+
+```{r , Calculate GFA, echo=TRUE, fig.height = 8, fig.width = 8 }
+MY <- list(MEDIA,THICK,SULC,VOL)
+
+mynorm <- normalizeData(MY, type="scaleFeatures")
+
+# Get the default options
+opts <- getDefaultOpts()
+opts$vrbose <- 0
+
+# number of data for posterior vector:
+opts$iter.saved = 100
+
+startK = length(c(screenvars,thickvars,sulcvars,volvars))
+
+# Run the GFA:
+# set.seed(123); res <- gfa(mynorm$train, K=startK, opts=opts)
+
+myall <- paste(mydir,"/ABCD_nda17_GFA_Medial_FSbrain_03.04.2018",".RData",sep="")
+load(myall)
+
+# Write the result to a file
+# myall <- paste(mydir,"/ABCD_nda17_GFA_Medial_FSbrain_03.04.2018",".RData",sep="")
+# save(res, file=myall)
+
+# Visualize the results
+vis <- visualizeComponents(res, Y = NULL, hclust = FALSE, topK = 0)
+myvec <- var.exp(res,10)
+nmvec <- as.array(myvec[,1])
+print("Variance Explained by Top 10 comoponents:")
+print(myvec)
+vis.W(res, nmvec, c('Media','Cortical Thickness','Sulcal Depth','Gray Matter Volume'), 0.95,paste("GFA",nmvec,sep=""))
+
+```
+
+Plotting the GFA shows that most of the variance is accounted for by the first few GFAs.  A selection of 10 GFAs accounts for 36 percent of the variance.  Aside from the GFAs that integrate across blocks, this GFA also recovers the media related GFAs previously reported.
+
+```{r , Setting up the GFAs for  graphing, echo = FALSE, fig.height = 6, fig.width = 6 }
+
+# Load the previously calculated GFA
+mydir <- getwd()
+myall <- paste(mydir,"/ABCD_nda17_GFA_Medial_FSbrain_03.04.2018",".RData",sep="")
+load(myall)
+
+# Plotting the variance of the top 10 components, which all account for > 1 % of the variance
+# myvec <- var.exp(res,10)
+# nmvec <- as.array(myvec[,1])
+# print("Variance Explained by Top 10 components:")
+# print(myvec)
+
+# Setting up the data frame of GFA components
+
+GFAnumber <-0
+GFAvariables <- rep(c(screenvars,thickvars,sulcvars,volvars), res$K)
+GFAvarlabs <- rep(c(screenvars,
+                    paste(desikan[c(thickorder),2],desikan[c(thickorder),3],"TH",sep=" "),
+                    paste(desikan[c(sulcorder),2],desikan[c(sulcorder),3],"SD",sep=" "),
+                    paste(desikan[c(volorder),2],desikan[c(volorder),3],"GV",sep=" ")),
+                     res$K)
+GFAgroups <- rep(c(rep("Screen Media",length(screenvars)),
+                    rep("Thickness",length(thickvars)),
+                    rep("Sulcal Depth",length(sulcvars)),
+                    rep("Volume",length(volvars))),res$K)
+                 
+myvalues <- array(0,c(res$D*res$K,3))
+GFAlabels <- c("2.5% CI","Median","97.5% CI")
+
+colnames(myvalues)[1:3] <- c("CI025", "Median", "CI975")
+for(i in 1:3){
+label(myvalues[[i]]) <- GFAlabels[i]
+}
+
+for(i in 1: res$K){
+  for(j in 1: res$D){
+    GFAnumber[j+(i-1)*res$D] <- paste("SMA_GFA",i, sep="")
+    myvalues[j+(i-1)*res$D,] <- quantile(res$posterior$W[,j,i], probs = c(0.025, 0.5, 0.975))
+  }
+}
+
+myframe <-data.frame(GFAnumber,GFAgroups,GFAvarlabs,GFAvariables,myvalues)
+myframe$GFAvariables <- factor(myframe$GFAvariables, levels = c(screenvars,thickvars,sulcvars,volvars))
+
+# Save my data frame:
+write.csv(myframe,file = "MediaBrainGFA_03.16.2018.csv")
+
+# Make X Matrix into a data frame
+myGFA <- data.frame(res$X)
+colnames(myGFA) <- c(paste("SMA_GFA",1:res$K,sep = ""))
+
+# Here go the multiplications:
+# myframe[myframe$GFAnumber=='GFA_M_FS1',c('CI025','MED','CI975')] <- (-1) * myframe[myframe$GFAnumber=='GFA_M_FS1',c('CI025','MED','CI975')]
+# myframe[myframe$GFAnumber=='GFA_M_FS2',c('CI025','MED','CI975')] <- (-1) * myframe[myframe$GFAnumber=='GFA_M_FS2',c('CI025','MED','CI975')]
+#myframe[myframe$GFAnumber=='GFA12',c('CI025','MED','CI975')] <- (-1) * myframe[myframe$GFAnumber=='GFA12',c('CI025','MED','CI975')]
+
+# Multiplying the GFAs with (-1) to get them to all go in the same direction for media variables
+# myGFA$GFA_M_FS2 <- -myGFA$GFA_M_FS2
+# myGFA$GFA_M_FS1 <- -myGFA$GFA_M_FS1
+#myGFA$GFA12 <- -myGFA$GFA12
+
+# Combining the data set and writing it to a file:
+# This will critically depend on how many subjects make up the reduceddata set.
+abcdmediabrain_qc <- cbind(calcdata,myGFA)
+myall <- paste(mydir,"/ABCD_nda17_GFA_Medial_FSbrain_combined_03.04.2018",".RData",sep="")
+save(abcdmediabrain_qc, file=myall)
+
+```
+
+Plotting the median and 95 percent credible interval of the GFA loading scores shows that the first GFA loads on video and social media related activity and is associated with reduced cortical thickness across many areas.  Most notably, posterior brain areas show the most significant reduction in cortical thickness.  The link between these media variables and sulcal depth is more complex.  Whereas some sulcal depths, e.g. anterior and posterior cingulate, are positively related to these variables, other, e.g. medial orbitofrontal and temporal pole, are negatively related to media variables.  Increase media activity is related to reduced volumes most notably in superior frontal and orbitofrontal areas.  The second media GFA loaded most significantly on watching mature videos, engaging in gaming and video watching on the weekend, and negatively on texting during the week.  This multi-block GFA was related to reduced cortical thickness most notably in superior or middle frontal cortex and inferior parietal cortex.  Moreover, this GFA was also related to increased superiorfrontal and superior temporal sulcal depth.  Lastly, media activity in this GFA was also relate to greater volume in the cingulum, medial orbitofrontal, and reduced volume in the frontal and temporal pole. The third media-related GFA loaded positively on all aspects of media activity and negatively on cortical thickness for visual areas (lingual, cuneus and pericalcarine) but positively for temporal cortical thickness.  This GFA loaded positively with sulcal depths in parieto-temporal areas and negatively with sulcal depth in primary visual areas.  Most notably, this GFA was strongly negatively related to volumes in the visual system.  The fifth GFA, which also loaded on media activity showed selective positive loadings with thickness in the visual area, sulcal depth in visual areas, and increased volume in visual areas.
+
+```{r , Post GFA Calculation Processing, , echo=TRUE, fig.height = 10, fig.width = 8 }
+
+# Plotting the variance (unsorted)
+# myvec <- var.exp(res,20)
+nmvec <- as.array(myvec[,1])
+
+# Plotting Factors
+# Here is where the selected GFAs are identified:
+
+GFAselect <- nmvec
+PlotNb = 10
+myfactors <- paste("SMA_GFA", GFAselect[1:length(GFAselect)], sep="")
+mytitles <- {}
+
+for(i in 1:length(GFAselect)){
+  # myfactors <- cbind(myfactors,paste("GFA", GFAselect[i], sep=""))
+  # assign GFA5 to GFA4 and GFA4 to GFA4x
+  if(i==4) {mytitles  <- cbind(mytitles,paste("SMA_GFA", "4x"," (",round(myvec[i,2],digits=2),"% Variance)",sep=""))
+  } else if(i==5) {mytitles  <- cbind(mytitles,paste("SMA_GFA", "4"," (",round(myvec[i,2],digits=2),"% Variance)",sep=""))
+  } else {
+  mytitles  <- cbind(mytitles,paste("SMA_GFA", GFAselect[i]," (",round(myvec[i,2],digits=2),"% Variance)",sep=""))
+  }
+}
+
+
+
+# Plot the GFAs separately for the different brain variables:
+mediaGFAs <- c(1,2,3,5)
+
+for(i in 1:length(mediaGFAs)){
+plotGFA <- paste("SMA_GFA",mediaGFAs[i],sep="")
+
+# Thickness
+thickGFA <- subset(myframe,(GFAnumber == plotGFA))
+mynames <- c(screenvars,"TH")
+thickGFA <- thickGFA[grep(paste(mynames, collapse='|'), thickGFA$GFAvarlabs, ignore.case=FALSE),]
+thickGFA$GFAvariables <- factor(thickGFA$GFAvariables,c(screenvars,as.character(thickvars_r)))
+
+myGFAplot <-   ggplot(thickGFA, aes(GFAvariables, Median)) +  
+  theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.8))) +
+  geom_point() + ggtitle(paste("Cortical Thickness:",mytitles[mediaGFAs[i]],sep = " "))  + geom_errorbar(aes(GFAvariables,ymin=CI025,ymax=CI975)) + geom_hline(yintercept = 0) + 
+  scale_x_discrete(labels= c(screenvars,as.character(thicklabels))) +
+  coord_flip()
+print(myGFAplot)
+
+# Sulcal Depth
+sulcGFA <- subset(myframe,(GFAnumber== plotGFA))
+mynames <- c(screenvars,"SD")
+sulcGFA <- sulcGFA[grep(paste(mynames, collapse='|'), sulcGFA$GFAvarlabs, ignore.case=FALSE),]
+sulcGFA$GFAvariables <- factor(sulcGFA$GFAvariables,c(screenvars,as.character(sulcvars_r)))
+
+myGFAplot <- ggplot(sulcGFA, aes(GFAvariables, Median)) + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.8))) + geom_point() + ggtitle(paste("Sulcal Depth:",mytitles[mediaGFAs[i]],sep = " "))  + geom_errorbar(aes(GFAvariables,ymin=CI025,ymax=CI975)) + geom_hline(yintercept = 0) +
+  scale_x_discrete(labels= c(screenvars,as.character(sulclabels))) +
+  coord_flip()
+print(myGFAplot)
+
+# Volumes
+volGFA <- subset(myframe,(GFAnumber== plotGFA))
+mynames <- c(screenvars,"GV")
+volGFA <- volGFA[grep(paste(mynames, collapse='|'), volGFA$GFAvarlabs, ignore.case=FALSE),]
+volGFA$GFAvariables <- factor(volGFA$GFAvariables,c(screenvars,as.character(volvars_r)))
+
+myGFAplot <- ggplot(volGFA, aes(GFAvariables, Median)) + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(1.0))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.8))) + geom_point() + ggtitle(paste("Gray Matter Volume:",mytitles[mediaGFAs[i]],sep = " "))  + geom_errorbar(aes(GFAvariables,ymin=CI025,ymax=CI975)) + geom_hline(yintercept = 0) +
+scale_x_discrete(labels= c(screenvars,as.character(vollabels))) +
+  coord_flip()
+print(myGFAplot)
+}
+
+
+for(i in 1:length(GFAselect)){
+myGFAplot <- ggplot(subset(myframe,GFAnumber==myfactors[i]), aes(GFAvariables, Median)) + theme(axis.text.x = element_text(angle = 90, hjust = 1,size=rel(0.4))) + theme(axis.text.y = element_text(hjust = 1,size=rel(0.4))) + geom_point() + ggtitle(mytitles[i])  + geom_errorbar(aes(GFAvariables,ymin=CI025,ymax=CI975)) + geom_hline(yintercept = 0) + coord_flip()
+print(myGFAplot)
+}
+
+# Reconstruction of the data
+
+rec <- reconstruction(res)                        #Reconstruction
+recOrig <- undoNormalizeData(rec, mynorm)           #... to original space
+
+# Write the reconstructed Data to a file
+myall <- paste(mydir,"/ABCD_nda17_GFA_Medial_FSbrain_Recon_03.04.2018",".RData",sep="")
+save(recOrig, file=myall)
+
+
+```
+
+``` {r, Circle Plots of GFAs, fig.height = 13, fig.width = 13 }
+
+# Need to reorder variables
+
+for(i in 1:10){
+  # reorder with the match trick here:
+  mycircdata <- subset(myframe,GFAnumber==myfactors[i])
+  mynew <- mycircdata[match(c(screenvars,as.character(thickvars_r),as.character(sulcvars_r),as.character(volvars_r)),mycircdata$GFAvariables),]
+  # Generate the circbars here:
+  mycirc <- Circbar(mynew,3,mytitles[i])
+  print(mycirc)
+}
+
+```
+
+The correlation plots between these GFAs shows that they are highly orthogonal.
+
+```{r, Cross-Correlation of GFAs, fig.height = 8, fig.width = 8, echo = FALSE}
+
+corM <- cor(myGFA[,GFAselect], method='spearman', use='pair')
+corrplot::corrplot.mixed(corM,lower = "number",upper = "ellipse",addgrid.col = NA,lower.col = "black",tl.pos = "lt",tl.cex = 1.,number.cex = .7,tl.col = "black")
+
+corrplot::corrplot(corM, title = "GFAs", method='ellipse',addgrid.col = NA, tl.cex = .7,tl.col = "black",mar=c(0,0,1,0),order = "hclust")
+
+```
+R Code:  
+```{r , Load the data set for Mixed Model Preparation, eval=TRUE, echo=TRUE}
+
+# load the GFAs
+mydir <- getwd()
+myall <- paste(mydir,"/ABCD_nda17_GFA_Medial_FSbrain_combined_03.04.2018",".RData",sep="")
+load(myall)
+mynames <- names(abcdmediabrain_qc)
+
+# Recoding levels:
+abcdmediabrain_qc$high.educ <- factor(abcdmediabrain_qc$high.educ,levels(factor(abcdmediabrain_qc$high.educ))[c(3,1,2,4,5,6)])
+abcdmediabrain_qc$highest.household.income <- factor(abcdmediabrain_qc$highest.household.income,levels(factor(abcdmediabrain_qc$highest.household.income))[c(2,4,3,1)])
+
+# Get all the different variables for the GAMM4 models:
+basicvars <- c("age","anthroweight1lb","anthro_1_height_in","bmi",
+               "demo_prnt_age_v2")
+screentimevars <- c("wkd_screentime","wnd_screentime","weekscreentime")
+psbvars <- mynames[intersect(grep("psb\\_",mynames),grep("mean$",mynames))]
+crpbivars <- mynames[grep("crpbi",mynames)]
+fcvars <- mynames[grep("fes\\_",mynames)]
+pmqvars <- mynames[intersect(grep("pmq",mynames),grep("mean$",mynames))]
+cogvars <- c(mynames[intersect(grep("nihtbx",mynames),grep("ed$",mynames))],
+             mynames[grep("pea",mynames)])
+demovars <- c("age","female","bmi","race.ethnicity","high.educ","married",
+              "highest.household.income","anthro_1_height_in","anthroweight1lb","demo_prnt_age_v2")
+physical <- c("physical_activity1_y","physical_activity2_y","physical_activity5_y")
+cbclvars <- mynames[intersect(grep("cbcl",mynames),grep("t$",mynames))]
+
+fcvarsR <- c("fes_y_ss_fc","fes_p_ss_fc")
+crpbivarsR <- c("crpbi_y_ss_parent","crpbi_y_ss_caregiver")
+
+# CBCL and Cognitive Variables:
+cbclvars <- mynames[intersect(grep("cbcl_scr_syn",mynames),grep("\\_t$",mynames))]
+# Cognitive variables:
+cogvars <- c(mynames[intersect(grep("nihtbx_",mynames),grep("agecorrected$",mynames))],"pea_ravlt_sd_trial_vi_tc","pea_ravlt_ld_trial_vii_tc","pea_wiscv_tss")
+
+# Sleep variables
+sleepvars <- mynames[grep("sds\\_",mynames)]
+sleepvars <- sleepvars[-grep("nt$",sleepvars)]  
+sleepvars <- sleepvars[-grep("nm$",sleepvars)]  
+
+# Rename the variables for the GAMM4 models:
+sGFA <- myfactors
+
+```
+
+This shows the distribution of missing values, i.e. most of the missing values come from missing cognition variables, aand the mixed model effects, several findings are noteworthy:
+
+* most of the findings are with GFA5, which is a mix of increased thickness of visual areas with decreased thickness in temporal cortical areas and corresponding volumes
+
+* For psychophathology, those individuals with greater scores on GFA5 have more psychopathology, both internalizing and but more so externalizing
+
+* several GFAs are related to differences in cognitive performance:
+
+* GFA2 is generally related to better performance on some but not all measures
+
+* GFA5 is related to poorer performance no most cognitive tasks
+
+* GFA1 and GFA3 show no consistent relationship to cognitive performance, although GFA1 shows some relationship to poorer crystalized composite performance
+
+* These effects are modest, explaining between 2-4 percent of the variance
+
+* The Media GFAs show now relationship to physical activity
+
+* Media GFA5 is strongly related to more youth reported family conflict but not parent reported family conflict
+
+* Media GFA5 is also strongly related to sleep disturbance, i.e. initiation and maintenance of sleep
+
+* Media GFA itself is influenced by minority race, parental education, and parental marital status.
+
+
+
+```{r , GAMM4 models , eval=TRUE, echo=TRUE, fig.height = 6, fig.width = 8}
+
+## Select covariates for model
+covars <- c("age","female","bmi","race.ethnicity","high.educ","married","highest.household.income","demo_prnt_age_v2")
+
+names(abcdmediabrain_qc)[names(abcdmediabrain_qc)=="highest.household.income"] <- "HHInc"
+covars <- c("age","female","bmi","race.ethnicity","high.educ","married","HHInc","demo_prnt_age_v2")
+
+## Select the nesting variables: site and twin status
+nestvars <- c("site_name","FamilyID")
+
+## Select dependent variables
+depvars <- c(cbclvars,cogvars,physical,fcvarsR,sleepvars)
+deplabels <- c("Anxious/Depressed","Withdrawn","Somatic Sx","Social Problems","Thought Problems","Attention Problems","Rule Breaking","Aggressive Behavior","Internalizing","Externalizing","Total Problems",
+  "Picture Vocabulary","Flanker Test","List Sorting","Card Sorting","Pattern Comparison","Picture Sequence","Oral Reading Recog","Fluid Composite","Crystallized Composite","Cognition Total","RAVLT Short Delay","RAVLT Long Delay","WISC-V Matrix Reasoning",
+  "Days Physically Active","Muscle Strength Activity","PE days in a week",
+               "Family Environment Conflict YOUTH","Family Environment Conflict PARENT","SDS Initiation & Maintenance","SDS Sleep Breathing Disorder","SDS Arousal Disorder","SDS Sleep Wake Transition","SDS Excessive Somonolence","SDS Hyperhydrosis","SDS Total")
+
+## Selected dependent variables
+sdepvars <- c("cbcl_scr_syn_internal_t","cbcl_scr_syn_external_t","nihtbx_fluidcomp_agecorrected",
+              "nihtbx_cryst_agecorrected")
+sdeplabels <-c("Internalizing","Externalizing","Fluid Composite","Crystallized Composite")
+
+# Normalize the brain covariates
+abcdmediabrain_qc$zct_mean <- c(scale(abcdmediabrain_qc$ct_mean))
+abcdmediabrain_qc$zintracranialvolume <- c(scale(abcdmediabrain_qc$intracranialvolume))
+
+## Select the independent variables:
+# adding the mean thickness and volume makes the regression unstable because of the high
+# correlation with GFA1 and GFA2:
+indepvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA5")
+
+## Form a temporary data frame with the necessary variables
+gamm4data <- abcdmediabrain_qc[complete.cases(abcdmediabrain_qc[,c(covars,nestvars,sdepvars,indepvars)]),
+                          c(covars,nestvars,sdepvars,indepvars)]
+
+# Visualizing missing data
+aggr(abcdmediabrain_qc[,c(covars,nestvars,sdepvars,indepvars)],col = c("blue","orange"),sortVars=TRUE,prop = FALSE, numbers = TRUE, combined = TRUE, cex.lab = 0.4, cex.axis =0.4, cex.numbers =0.4)
+
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,sdepvars])
+
+# Revise the naming of the GFA variables
+
+rindepvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA4")
+setnames(gamm4data, old=c(indepvars), new=c(rindepvars))
+
+# Gamm4.vis(mygamm4GFA,gamm4data,"SM","physical_activity1_y",indepvars,covars,"SM","Physical")
+
+gammvars <- c("Intercept","SMA GFA1","SMA GFA2","SMA GFA3",
+              "SMA GFA4","Age","Female","BMI",
+              "RE: Black","RE: Hisp","RE:Asian","RE: Other","Ed: < HS","Ed: HS","Ed: Bachelor",
+              "Ed: >Bachelor","Ed: Other","Parents Married","Inc: 50-100k",
+              "Inc: +100k","Inc: unkown","Parental Age")
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+  
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- abcdmediabrain_qc[complete.cases(abcdmediabrain_qc[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) + 
+  aes(x = term, ymin = median - 1.96 * sd, 
+      ymax = median + 1.96 * sd, y = median) + 
+  geom_pointrange() + 
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) + 
+  coord_flip() + 
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""), 
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# Visualize Random Effects:
+reEx <- REsim(mygamm4GFA$mer)
+p1 <- plotREsim(reEx)
+
+print(p1)
+
+# Visualize the marginal effect
+# For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(1,2,3,4)
+plotlist <- list()
+
+for(j in 1:length(mediaGFAs)){
+  plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+  myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+  p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,rindepvars,covars,
+                  myGFAtitle,sdeplabels[i])
+  plotlist[[j]] <- p1
+}
+
+mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+
+depvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA4")
+
+# Loop through GFAs as dependent variables:
+for(i in 1:length(depvars)){
+# Assign a dependent variable:
+  mydepvar <- depvars[i]
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+
+print(summary(mygamm4base$gam))
+print(AIC(mygamm4base$mer))
+}
+
+
+```
+
+```{r , GAMM4 models with SMA_GFA10 , eval=TRUE, echo=TRUE, fig.height = 6, fig.width = 8}
+
+## Select covariates for model
+covars <- c("age","female","bmi","race.ethnicity","high.educ","married","highest.household.income","demo_prnt_age_v2")
+
+names(abcdmediabrain_qc)[names(abcdmediabrain_qc)=="highest.household.income"] <- "HHInc"
+covars <- c("age","female","bmi","race.ethnicity","high.educ","married","HHInc","demo_prnt_age_v2")
+
+## Select the nesting variables: site and twin status
+nestvars <- c("site_name","FamilyID")
+
+## Select dependent variables
+depvars <- c(cbclvars,cogvars,physical,fcvarsR,sleepvars)
+deplabels <- c("Anxious/Depressed","Withdrawn","Somatic Sx","Social Problems","Thought Problems","Attention Problems","Rule Breaking","Aggressive Behavior","Internalizing","Externalizing","Total Problems",
+  "Picture Vocabulary","Flanker Test","List Sorting","Card Sorting","Pattern Comparison","Picture Sequence","Oral Reading Recog","Fluid Composite","Crystallized Composite","Cognition Total","RAVLT Short Delay","RAVLT Long Delay","WISC-V Matrix Reasoning",
+  "Days Physically Active","Muscle Strength Activity","PE days in a week",
+               "Family Environment Conflict YOUTH","Family Environment Conflict PARENT","SDS Initiation & Maintenance","SDS Sleep Breathing Disorder","SDS Arousal Disorder","SDS Sleep Wake Transition","SDS Excessive Somonolence","SDS Hyperhydrosis","SDS Total")
+
+## Selected dependent variables
+sdepvars <- c("cbcl_scr_syn_internal_t","cbcl_scr_syn_external_t","nihtbx_fluidcomp_agecorrected",
+              "nihtbx_cryst_agecorrected")
+sdeplabels <-c("Internalizing","Externalizing","Fluid Composite","Crystallized Composite")
+
+# Normalize the brain covariates
+abcdmediabrain_qc$zct_mean <- c(scale(abcdmediabrain_qc$ct_mean))
+abcdmediabrain_qc$zintracranialvolume <- c(scale(abcdmediabrain_qc$intracranialvolume))
+
+## Select the independent variables:
+# adding the mean thickness and volume makes the regression unstable because of the high
+# correlation with GFA1 and GFA2:
+indepvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA5","SMA_GFA10")
+
+## Form a temporary data frame with the necessary variables
+gamm4data <- abcdmediabrain_qc[complete.cases(abcdmediabrain_qc[,c(covars,nestvars,sdepvars,indepvars)]),
+                          c(covars,nestvars,sdepvars,indepvars)]
+
+# Visualizing missing data
+aggr(abcdmediabrain_qc[,c(covars,nestvars,sdepvars,indepvars)],col = c("blue","orange"),sortVars=TRUE,prop = FALSE, numbers = TRUE, combined = TRUE, cex.lab = 0.4, cex.axis =0.4, cex.numbers =0.4)
+
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,sdepvars])
+
+# Revise the naming of the GFA variables
+
+rindepvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA4","SMA_GFA10")
+setnames(gamm4data, old=c(indepvars), new=c(rindepvars))
+
+# Gamm4.vis(mygamm4GFA,gamm4data,"SM","physical_activity1_y",indepvars,covars,"SM","Physical")
+
+gammvars <- c("Intercept","SMA GFA1","SMA GFA2","SMA GFA3",
+              "SMA GFA4","SMA GFA10","Age","Female","BMI",
+              "RE: Black","RE: Hisp","RE:Asian","RE: Other","Ed: < HS","Ed: HS","Ed: Bachelor",
+              "Ed: >Bachelor","Ed: Other","Parents Married","Inc: 50-100k",
+              "Inc: +100k","Inc: unkown","Parental Age")
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+  
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- abcdmediabrain_qc[complete.cases(abcdmediabrain_qc[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) + 
+  aes(x = term, ymin = median - 1.96 * sd, 
+      ymax = median + 1.96 * sd, y = median) + 
+  geom_pointrange() + 
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) + 
+  coord_flip() + 
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""), 
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# Visualize Random Effects:
+reEx <- REsim(mygamm4GFA$mer)
+p1 <- plotREsim(reEx)
+
+print(p1)
+
+# Visualize the marginal effect
+# For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(1,2,3,4,10)
+plotlist <- list()
+
+for(j in 1:length(mediaGFAs)){
+  plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+  myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+  p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,rindepvars,covars,
+                  myGFAtitle,sdeplabels[i])
+  plotlist[[j]] <- p1
+}
+
+mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+
+depvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA4","SMA_GFA10")
+
+# Loop through GFAs as dependent variables:
+for(i in 1:length(depvars)){
+# Assign a dependent variable:
+  mydepvar <- depvars[i]
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+
+print(summary(mygamm4base$gam))
+print(AIC(mygamm4base$mer))
+}
+
+
+```
+
+
+
+```{r , GAMM4 models with volume as a covariate, eval=TRUE, echo=TRUE, fig.height = 6, fig.width = 8}
+
+## Select covariates for model
+covars <- c("age","female","bmi","race.ethnicity","high.educ","married","highest.household.income","demo_prnt_age_v2")
+
+names(abcdmediabrain_qc)[names(abcdmediabrain_qc)=="highest.household.income"] <- "HHInc"
+covars <- c("age","female","bmi","race.ethnicity","high.educ","married","HHInc","demo_prnt_age_v2","zintracranialvolume")
+
+## Select the nesting variables: site and twin status
+nestvars <- c("site_name","FamilyID")
+
+## Select dependent variables
+depvars <- c(cbclvars,cogvars,physical,fcvarsR,sleepvars)
+deplabels <- c("Anxious/Depressed","Withdrawn","Somatic Sx","Social Problems","Thought Problems","Attention Problems","Rule Breaking","Aggressive Behavior","Internalizing","Externalizing","Total Problems",
+  "Picture Vocabulary","Flanker Test","List Sorting","Card Sorting","Pattern Comparison","Picture Sequence","Oral Reading Recog","Fluid Composite","Crystallized Composite","Cognition Total","RAVLT Short Delay","RAVLT Long Delay","WISC-V Matrix Reasoning",
+  "Days Physically Active","Muscle Strength Activity","PE days in a week",
+               "Family Environment Conflict YOUTH","Family Environment Conflict PARENT","SDS Initiation & Maintenance","SDS Sleep Breathing Disorder","SDS Arousal Disorder","SDS Sleep Wake Transition","SDS Excessive Somonolence","SDS Hyperhydrosis","SDS Total")
+
+## Selected dependent variables
+sdepvars <- c("cbcl_scr_syn_internal_t","cbcl_scr_syn_external_t","nihtbx_fluidcomp_agecorrected",
+              "nihtbx_cryst_agecorrected")
+sdeplabels <-c("Internalizing","Externalizing","Fluid Composite","Crystallized Composite")
+
+# Normalize the brain covariates
+abcdmediabrain_qc$zct_mean <- c(scale(abcdmediabrain_qc$ct_mean))
+abcdmediabrain_qc$zintracranialvolume <- c(scale(abcdmediabrain_qc$intracranialvolume))
+
+## Select the independent variables:
+# adding the mean thickness and volume makes the regression unstable because of the high
+# correlation with GFA1 and GFA2:
+indepvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA5")
+
+## Form a temporary data frame with the necessary variables
+gamm4data <- abcdmediabrain_qc[complete.cases(abcdmediabrain_qc[,c(covars,nestvars,sdepvars,indepvars)]),
+                          c(covars,nestvars,sdepvars,indepvars)]
+
+# Visualizing missing data
+aggr(abcdmediabrain_qc[,c(covars,nestvars,sdepvars,indepvars)],col = c("blue","orange"),sortVars=TRUE,prop = FALSE, numbers = TRUE, combined = TRUE, cex.lab = 0.4, cex.axis =0.4, cex.numbers =0.4)
+
+# Center all dependent measures
+gamm4data[,depvars] <- scale(gamm4data[,sdepvars])
+
+# Revise the naming of the GFA variables
+
+rindepvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA4")
+setnames(gamm4data, old=c(indepvars), new=c(rindepvars))
+
+# Gamm4.vis(mygamm4GFA,gamm4data,"SM","physical_activity1_y",indepvars,covars,"SM","Physical")
+
+gammvars <- c("Intercept","SMA GFA1","SMA GFA2","SMA GFA3",
+              "SMA GFA4","Age","Female","BMI",
+              "RE: Black","RE: Hisp","RE:Asian","RE: Other","Ed: < HS","Ed: HS","Ed: Bachelor",
+              "Ed: >Bachelor","Ed: Other","Parents Married","Inc: 50-100k",
+              "Inc: +100k","Inc: unkown","Parental Age","Intracranial Vol.")
+
+# Loop through dependent variables:
+for(i in 1:length(sdepvars)){
+# Assign a dependent variable:
+  mydepvar <- sdepvars[i]
+  mydeplabel <- sdeplabels[i]
+  
+# Form a temporary data set that only contains one dependent variable (minimize missingness):
+gamm4dataR <- abcdmediabrain_qc[complete.cases(abcdmediabrain_qc[,c(covars,nestvars,mydepvar,indepvars)]),c(covars,nestvars,mydepvar,indepvars)]
+gamm4dataR[,mydepvar] <- scale(gamm4dataR[,mydepvar])
+
+# rename the GFA variables:
+setnames(gamm4dataR, old=c(indepvars), new=c(rindepvars))
+
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+mygamm4GFA <- myGAMM4(mydepvar,rindepvars,covars,nestvars,gamm4dataR)
+
+# Visualize the GAMM4 Coefficients:
+# https://cran.r-project.org/web/packages/merTools/vignettes/merToolsIntro.html
+
+feEx <- FEsim(mygamm4GFA$mer,1000)
+cbind(feEx[,1],round(feEx[,2:4],3))
+feEx$term <- gammvars
+
+gamm4coeff <- ggplot(feEx[feEx$term!= "Intercept" & feEx$term!= "Ed: Other", ]) + 
+  aes(x = term, ymin = median - 1.96 * sd, 
+      ymax = median + 1.96 * sd, y = median) + 
+  geom_pointrange() + 
+  geom_hline(yintercept = 0, size = I(1.1), color = I("red")) + 
+  coord_flip() + 
+  theme_bw() + labs(title = paste(mydeplabel,": Median Effect Size",sep=""), 
+                    x = "Mixed Model Variables", y = "Standardized Coefficients")
+
+print(gamm4coeff)
+
+# Visualize Random Effects:
+reEx <- REsim(mygamm4GFA$mer)
+p1 <- plotREsim(reEx)
+
+print(p1)
+
+# Visualize the marginal effect
+# For multipanel: https://sebastiansauer.github.io/two-plots-rmd/
+mediaGFAs <- c(1,2,3,4)
+plotlist <- list()
+
+for(j in 1:length(mediaGFAs)){
+  plotGFA <- paste("SMA_GFA",mediaGFAs[j],sep="")
+  myGFAtitle <- paste("SMA GFA",mediaGFAs[j],sep="")
+  p1 <- Gamm4.vis(mygamm4GFA,gamm4dataR,plotGFA,mydepvar,rindepvars,covars,
+                  myGFAtitle,sdeplabels[i])
+  plotlist[[j]] <- p1
+}
+
+mygridtitle <- paste("Marginal Plots: ",sdeplabels[i],sep="")
+grid.arrange(plotlist[[1]],plotlist[[2]],plotlist[[3]],plotlist[[4]],ncol = 2,top=mygridtitle)
+
+print(summary(mygamm4base$gam))
+print(summary(mygamm4GFA$gam))
+# Model Comparison:
+print(anova(mygamm4base$mer,mygamm4GFA$mer))
+print(AIC(mygamm4base$mer))
+print(AIC(mygamm4GFA$mer))
+}
+
+depvars <- c("SMA_GFA1","SMA_GFA2","SMA_GFA3","SMA_GFA4")
+
+# Loop through GFAs as dependent variables:
+for(i in 1:length(depvars)){
+# Assign a dependent variable:
+  mydepvar <- depvars[i]
+# Compare the model with and without the GFAs:
+mygamm4base <- myGAMM4(mydepvar,"null",covars,nestvars,gamm4dataR)
+
+print(summary(mygamm4base$gam))
+print(AIC(mygamm4base$mer))
+}
+```
+
+The univariate quartile tables show the general results found with the mixed model analyses:
+
+For Media GFA5:
+
+* fewer females are in the highest quartile
+
+* minorities are over-represented in the highest quartile
+
+* fewer parents with Bachelor or higher education
+
+* fewer married parents
+
+* fewer high-income parents
+
+* highest quartile increases t-scores for CBLC by about 0.5 standard deviation
+
+* similar effect size for decreases in cognitive performance (both fluid and crystalized)
+
+* about 0.5 standard deviation more sleep initiation and maintenance problems in highest quartile
+R Code:  
+```{r , Table with quartiles for Media Brain GFA 4, eval=TRUE, echo=TRUE, fig.height = 4, fig.width = 5}
+
+# Quartile the Social Media GFA
+abcdmediabrain_qc$qSMA_GFA4 <- as.factor(quantcut(abcdmediabrain_qc$SMA_GFA5))
+
+# General Sample Characteristics:
+# Need to rename the demographic variables:
+demovars <- c("age","female","bmi","race.ethnicity","high.educ","married",
+              "HHInc","anthro_1_height_in","anthroweight1lb","demo_prnt_age_v2")
+
+listvars <- c(demovars)
+catVars = c("female","race.ethnicity","married","high.educ","HHInc")
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediabrain_qc,factorVars=catVars,strata=c("qSMA_GFA4"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Demographics: Quartiles of SMA GFA4") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+# CBCL
+listvars <- cbclvars
+catVars = c()
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediabrain_qc,factorVars=catVars,strata=c("qSMA_GFA4"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "CBCL: Quartiles of SMA GFA4") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+# Free Surfer Mean Vars
+listvars <- fsmeanvars
+catVars = c()
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediabrain_qc,factorVars=catVars,strata=c("qSMA_GFA4"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "CBCL: Quartiles of SMA GFA4") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+
+# Cognitive Variables
+listvars <- cogvars
+catVars = c()
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediabrain_qc,factorVars=catVars,strata=c("qSMA_GFA4"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Cognition: Quartiles of SMA GFA4") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+# Sleep
+listvars <- sleepvars
+catVars = c()
+mytable1 <- CreateTableOne(vars = listvars,data=abcdmediabrain_qc,factorVars=catVars,strata=c("qSMA_GFA4"))
+
+# Make the Table look nice:
+tabAsStringMatrix <- print(mytable1, printToggle = FALSE, noSpaces = TRUE)
+kable(tabAsStringMatrix, "html",caption = "Sleep SDS: Quartiles of SMA GFA4") %>% kable_styling(bootstrap_options = c( "hover", "condensed", "responsive"),font_size = 11)
+
+```
+
+```{r, Correlations between Brain Media GFAs and Media GFAs, echo=TRUE}
+
+# the Media GFAs:
+GFAselect <- c(2,1,12,13,4,3,11,16)
+GFAselectLabel <- c("Psychopathology & Media","Cognition, Media, Psychopathology","General Media Activity","Social Media vs. Other Media","Cognition (1)","Cognition (2)","Psychopathology (2)","Media & Psychopathology")
+sGFAselectLabel <- c("PM","CMP","GMA","SM","C(1)","C(2)","P(2)","MP")
+fscovars <- c("ct_mean","intracranialvolume")
+
+PlotNb = 8
+myfactors <- paste("GFA", GFAselect[1:length(GFAselect)], sep="")
+
+# the Brain Media GFAs:
+brainGFAselect <- indepvars
+
+bothGFAs <- abcdmediabrain_qc[c(myfactors,brainGFAselect,fscovars)]
+names(bothGFAs)[match(myfactors,names(bothGFAs))] <- c(sGFAselectLabel,"Thickness","Volume")
+
+# revise label of GFAs
+setnames(bothGFAs, old=c(indepvars), new=c(rindepvars))
+
+corM <- cor(bothGFAs, method='spearman', use='pair')
+corrplot::corrplot.mixed(corM,lower = "number",upper = "ellipse",addgrid.col = NA,lower.col = "black",tl.pos = "lt",tl.cex = .7,number.cex = .7,tl.col = "black")
+
+corrplot::corrplot(corM, title = "Brain Media and Media GFAs", method='ellipse',addgrid.col = NA, tl.cex = .7,tl.col = "black",mar=c(0,0,1,0),order = "hclust")
+
+
+```
